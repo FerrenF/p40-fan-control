@@ -1,97 +1,65 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 
-import gpiozero
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import urllib
-import threading
+from flask import Flask, jsonify
+from gpiozero import OutputDevice
+import signal
+import sys
 
-# A very small web server that controls a relay gating power to a blower fan on a Tesla P40 GPU.
-
-
-# GPIO pin the relay is connected to
-RELAY_PIN = 17
-
-# create a relay object
-relay = gpiozero.OutputDevice(RELAY_PIN, active_high=True, initial_value=False)
-
-# Function to control the relay
-def set_relay(status):
-    if status:
-        print("Setting relay: ON")
-        relay.on()
-    else:
-        print("Setting relay: OFF")
-        relay.off()
-
-# Function to check if the relay is on
-def is_relay_on():
-    return relay.value  # Returns True if the relay is on, False if off
-
-# HTTP request handler
-class RelayRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        # Parse the query parameters
-        parsed_path = urllib.parse.urlparse(self.path)
-        query = urllib.parse.parse_qs(parsed_path.query)
-        
-        if parsed_path.path == '/control':  # Control relay using 'on' or 'off'
-            if 'status' in query:
-                status = query['status'][0]
-                if status == "on":
-                    set_relay(True)
-                    relay_status = is_relay_on()
-                    self.send_response(200)
-                    self.end_headers()
-                    if relay_status:
-                        self.wfile.write(b'Relay turned ON successfully')
-                    else:
-                        self.wfile.write(b'Failed to turn ON the relay')
-                elif status == "off":
-                    set_relay(False)
-                    relay_status = is_relay_on()
-                    self.send_response(200)
-                    self.end_headers()
-                    if not relay_status:
-                        self.wfile.write(b'Relay turned OFF successfully')
-                    else:
-                        self.wfile.write(b'Failed to turn OFF the relay')
-                else:
-                    self.send_response(400)
-                    self.end_headers()
-                    self.wfile.write(b'Invalid status. Use "on" or "off".')
-            else:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b'Missing "status" parameter')
-
-        elif parsed_path.path == '/status':  # Endpoint to check relay status
-            relay_status = is_relay_on()
-            self.send_response(200)
-            self.end_headers()
-            if relay_status:
-                self.wfile.write(b'Relay is ON')
-            else:
-                self.wfile.write(b'Relay is OFF')
-        
-        elif parsed_path.path == '/shutdown':  # Endpoint to shutdown the server
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b'Shutting down server...')
-            threading.Thread(target=self.server.shutdown).start()  # Shut down the server
+RELAY_PIN = 13
+ACTIVE_HIGH = True
+PORT = 8080
+HOST = "0.0.0.0"
+DEBUG = False
 
 
-# Function to run the HTTP server
-def run(server_class=HTTPServer, handler_class=RelayRequestHandler, port=8080):
-    server_address = ('', port)
-    httpd = server_class(server_address, handler_class)
-    print(f'Starting HTTP server on port {port}')
-    httpd.serve_forever()
+# P40 Project: Relay Controller. Turns the relay controlling power to the fan on and off.
+# 
+# You can also think of this as: Toggles the fan from low to high.
+# 'on' = low, 'off' = high, because the circuit I am using uses a relay with an ACTIVE HIGH
+
+
+
+relay = OutputDevice(
+    RELAY_PIN,
+    active_high=ACTIVE_HIGH,
+    initial_value=False
+)
+
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return jsonify({
+        "relay": "on" if relay.value else "off",
+        "endpoints": ["/on", "/off", "/toggle", "/status"]
+    })
+
+@app.route("/on")
+def relay_on():
+    relay.on()
+    return jsonify({"relay": "on"})
+
+@app.route("/off")
+def relay_off():
+    relay.off()
+    return jsonify({"relay": "off"})
+
+@app.route("/toggle")
+def relay_toggle():
+    relay.toggle()
+    return jsonify({"relay": "on" if relay.value else "off"})
+
+@app.route("/status")
+def relay_status():
+    return jsonify({"relay": "on" if relay.value else "off"})
+
+def shutdown_handler(signum, frame):
+    relay.off()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, shutdown_handler)
+signal.signal(signal.SIGTERM, shutdown_handler)
 
 if __name__ == "__main__":
-    try:
-        run()
-    except Exception as e:
-        print(f"Error occurred: {e}")
-    finally:
-        print("Cleaning up and turning off the relay...")
-        set_relay(False)  # Ensure the relay is off when the server shuts down
+    print(f"Relay web server running on {HOST}:{PORT}")
+    app.run(host=HOST, port=PORT, debug=DEBUG)
