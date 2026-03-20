@@ -1,0 +1,24 @@
+[Unit]
+Description=GPU Fan Controller for P40
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/gpu-fan-controller/gpu_fan_controller.py \
+    --pi-address=192.168.1.114 \
+    --pi-port=8080 \
+    --util-threshold=15 \
+    --temp-threshold=65 \
+    --check-interval=20 \
+    --min-runtime=120 \
+    --log-file=/var/log/gpu-fan-controller.log
+
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+User=root
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
