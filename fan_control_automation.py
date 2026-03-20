@@ -9,6 +9,8 @@ import signal
 
 # Fan control script for a PI controlled server fan running over a P40 within a server case.
 
+fan_on_status = "off" # if the relay is in this state, the fan is on
+fan_off_status = "on" # if the relay is in this state, the fan is off
 pi_address = '192.168.1.114'
 import pathlib
 logfile = pathlib.Path(__file__).parent.resolve().joinpath('gpu_fan_control.log')
@@ -58,8 +60,6 @@ def sigterm_all_gpu_processes():
             status = False
     return status
 
-
-
 def get_gpu_utilization():
     # Call nvidia-smi and parse utilization
     result = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'],
@@ -74,7 +74,7 @@ def get_gpu_temperature():
     temperature = int(result.stdout.strip())
     return temperature
 
-define_hot = 65 # Celsius, of course    
+hot_threshold = 65 # Celsius, of course    
 fan_timeout_count = 0
 fan_timeout_kill_threshold = 3
 process_kill_sent = False
@@ -100,10 +100,8 @@ def get_fan_status():
         response = requests.get(url)
         if response.status_code == 200:
             timeout_count_check()
-            if 'OFF' in str(response.content):
-                return 0
-            if 'ON' in str(response.content):
-                return 1
+            data = response.json()
+            return data.relay
     except requests.Timeout as ex:
         timeout_count_check(True)
         logging.exception("Connection to fan controller timed out.", ex)
@@ -134,19 +132,17 @@ def monitor_gpu_and_control_fan(use_threshold=15, check_interval=20):
         fan_status = get_fan_status()
         
         def gpu_getting_toasty():
-            global define_hot
-            return temperature >= define_hot
+            global hot_threshold
+            return temperature >= hot_threshold
 
         if utilization > use_threshold or gpu_getting_toasty():
-            if not fan_status == 1:
+            if not fan_status == fan_on_status:
                 logging.info(f'GPU in use - Utilization: {utilization}%, Temperature: {temperature}°C. Turning on blower fan.')
-                if control_blower_fan('on'):
-                    fan_on = True
+                control_blower_fan('on')
         else:
-            if fan_status == 1:
+            if not fan_status == fan_off_status:
                 logging.info(f'GPU idle - Utilization: {utilization}%, Temperature: {temperature}°C. Turning off blower fan.')
-                if control_blower_fan('off'):
-                    fan_on = False
+                control_blower_fan('off')
 
         time.sleep(check_interval)
         
