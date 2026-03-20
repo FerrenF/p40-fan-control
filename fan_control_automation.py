@@ -101,7 +101,8 @@ def get_fan_status():
         if response.status_code == 200:
             timeout_count_check()
             data = response.json()
-            return data.relay
+            print(data)
+            return data.get("relay")
     except requests.Timeout as ex:
         timeout_count_check(True)
         logging.exception("Connection to fan controller timed out.", ex)
@@ -114,9 +115,8 @@ def control_blower_fan(action):
         return -1
     
     try:
-        url = f'http://{pi_address}:8080/control' 
-        data = {'status': action} 
-        response = requests.get(url, params=data)
+        url = f"http://{pi_address}:8080/{action}"
+        response = requests.get(url)
         timeout_count_check()
         return response.status_code == 200
     except requests.Timeout as ex:
@@ -138,11 +138,11 @@ def monitor_gpu_and_control_fan(use_threshold=15, check_interval=20):
         if utilization > use_threshold or gpu_getting_toasty():
             if not fan_status == fan_on_status:
                 logging.info(f'GPU in use - Utilization: {utilization}%, Temperature: {temperature}°C. Turning on blower fan.')
-                control_blower_fan('on')
+                control_blower_fan(fan_on_status)
         else:
             if not fan_status == fan_off_status:
                 logging.info(f'GPU idle - Utilization: {utilization}%, Temperature: {temperature}°C. Turning off blower fan.')
-                control_blower_fan('off')
+                control_blower_fan(fan_off_status)
 
         time.sleep(check_interval)
         
