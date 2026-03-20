@@ -22,8 +22,17 @@ import requests
 
 
 class RelayState(Enum):
-    ENERGIZED = "off"   # Relay coil energized -> fan ON
-    RELEASED = "on"     # Relay coil released -> fan OFF
+    """
+    Relay states as reported by the Pi API.
+    
+    Hardware wiring: The relay breaks a resistor/throttle circuit.
+    - relay.off() → reports "off" → full power to fan → HIGH speed
+    - relay.on() → reports "on" → throttled power → LOW speed
+    
+    We name these by fan behavior, not relay state.
+    """
+    FAN_HIGH = "off"  # Relay released, fan at full speed
+    FAN_LOW = "on"    # Relay energized, fan throttled
 
 
 @dataclass
@@ -32,13 +41,16 @@ class FanControllerConfig:
     pi_address: str = "192.168.1.114"
     pi_port: int = 8080
     
+    # Thresholds
     utilization_threshold: int = 15      # GPU usage % to trigger fan
     temperature_threshold: int = 65      # Celsius to trigger fan
-
+    
+    # Timing
     check_interval: int = 20             # Seconds between checks
     minimum_fan_runtime: int = 120       # Minimum seconds fan stays on once activated
     request_timeout: int = 5             # HTTP request timeout
     
+    # Safety
     fan_timeout_kill_threshold: int = 3  # Failed checks before killing GPU processes
     
     @property
@@ -52,7 +64,7 @@ class GPUInterface(Protocol):
     def get_utilization(self) -> int:
         """Return GPU utilization percentage (0-100)."""
         ...
-
+    
     def get_temperature(self) -> int:
         """Return GPU temperature in Celsius."""
         ...
@@ -79,16 +91,27 @@ class RelayInterface(Protocol):
 
 
 class NvidiaSmiGPU:
+    """Real GPU interface using nvidia-smi."""
+    
     def get_utilization(self) -> int:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'],capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, check=True
+        )
         return int(result.stdout.strip())
     
     def get_temperature(self) -> int:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=temperature.gpu', '--format=csv,noheader,nounits'],capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=temperature.gpu', '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, check=True
+        )
         return int(result.stdout.strip())
     
     def get_processes(self) -> list[dict]:
-        result = subprocess.run(['nvidia-smi', '--query-compute-apps=pid,process_name,used_memory', '--format=csv,noheader'],capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            ['nvidia-smi', '--query-compute-apps=pid,process_name,used_memory', '--format=csv,noheader'],
+            capture_output=True, text=True, check=True
+        )
         
         processes = []
         for line in result.stdout.strip().splitlines():
@@ -96,7 +119,11 @@ class NvidiaSmiGPU:
                 continue
             parts = line.split(',')
             if len(parts) >= 3:
-                processes.append({'pid': int(parts[0].strip()), 'process_name': parts[1].strip(), 'used_memory': parts[2].strip()})
+                processes.append({
+                    'pid': int(parts[0].strip()),
+                    'process_name': parts[1].strip(),
+                    'used_memory': parts[2].strip()
+                })
         return processes
     
     def kill_process(self, pid: int) -> bool:
@@ -112,26 +139,36 @@ class NvidiaSmiGPU:
 
 
 class PiRelay:
+    """Real relay interface via Pi HTTP API."""
+    
     def __init__(self, config: FanControllerConfig):
         self.config = config
     
     def get_status(self) -> Optional[RelayState]:
         try:
-            response = requests.get( f"{self.config.base_url}/status", timeout=self.config.request_timeout)
+            response = requests.get(
+                f"{self.config.base_url}/status",
+                timeout=self.config.request_timeout
+            )
             response.raise_for_status()
             data = response.json()
             relay_value = data.get('relay')
-            if relay_value == RelayState.ENERGIZED.value:
-                return RelayState.ENERGIZED
-            elif relay_value == RelayState.RELEASED.value:
-                return RelayState.RELEASED
+            if relay_value == "off":
+                return RelayState.FAN_HIGH
+            elif relay_value == "on":
+                return RelayState.FAN_LOW
             return None
         except (requests.RequestException, KeyError, ValueError):
             return None
     
     def set_state(self, state: RelayState) -> bool:
+        """Set relay state by calling /on or /off endpoint."""
+        endpoint = "/off" if state == RelayState.FAN_HIGH else "/on"
         try:
-            response = requests.post( f"{self.config.base_url}/control", json={'status': state.value}, timeout=self.config.request_timeout)
+            response = requests.get(
+                f"{self.config.base_url}{endpoint}",
+                timeout=self.config.request_timeout
+            )
             return response.status_code == 200
         except requests.RequestException:
             return False
@@ -149,7 +186,13 @@ class ControllerState:
 class FanController:
     """Main controller coordinating GPU monitoring and fan control."""
     
-    def __init__( self, config: FanControllerConfig, gpu: GPUInterface, relay: RelayInterface, logger: Optional[logging.Logger] = None):
+    def __init__(
+        self,
+        config: FanControllerConfig,
+        gpu: GPUInterface,
+        relay: RelayInterface,
+        logger: Optional[logging.Logger] = None
+    ):
         self.config = config
         self.gpu = gpu
         self.relay = relay
@@ -158,7 +201,10 @@ class FanController:
     
     def should_fan_be_on(self, utilization: int, temperature: int) -> bool:
         """Determine if fan should be running based on current conditions."""
-        return ( utilization > self.config.utilization_threshold or temperature >= self.config.temperature_threshold)
+        return (
+            utilization > self.config.utilization_threshold or
+            temperature >= self.config.temperature_threshold
+        )
     
     def is_minimum_runtime_satisfied(self) -> bool:
         """Check if minimum fan runtime has elapsed since activation."""
@@ -170,11 +216,16 @@ class FanController:
     def handle_relay_timeout(self) -> None:
         """Handle communication failure with relay controller."""
         self.state.consecutive_timeouts += 1
-        self.logger.warning( f"Relay communication failed. Consecutive failures: {self.state.consecutive_timeouts}" )
+        self.logger.warning(
+            f"Relay communication failed. Consecutive failures: {self.state.consecutive_timeouts}"
+        )
         
         if self.state.consecutive_timeouts >= self.config.fan_timeout_kill_threshold:
             if not self.state.process_kill_sent:
-                self.logger.error(f"Fan unresponsive for {self.state.consecutive_timeouts} checks. Killing GPU processes as safety measure.")
+                self.logger.error(
+                    f"Fan unresponsive for {self.state.consecutive_timeouts} checks. "
+                    "Killing GPU processes as safety measure."
+                )
                 self._kill_all_gpu_processes()
                 self.state.process_kill_sent = True
     
@@ -199,15 +250,15 @@ class FanController:
         return all_killed
     
     def turn_fan_on(self) -> bool:
-        """Turn fan on and record activation time."""
-        success = self.relay.set_state(RelayState.ENERGIZED)
+        """Turn fan to high speed and record activation time."""
+        success = self.relay.set_state(RelayState.FAN_HIGH)
         if success and self.state.fan_activated_at is None:
             self.state.fan_activated_at = time.time()
         return success
     
     def turn_fan_off(self) -> bool:
-        """Turn fan off and clear activation time."""
-        success = self.relay.set_state(RelayState.RELEASED)
+        """Turn fan to low speed and clear activation time."""
+        success = self.relay.set_state(RelayState.FAN_LOW)
         if success:
             self.state.fan_activated_at = None
         return success
@@ -224,20 +275,28 @@ class FanController:
         
         self.handle_relay_success()
         
-        fan_is_on = (relay_status == RelayState.ENERGIZED)
+        fan_is_on = (relay_status == RelayState.FAN_HIGH)
         fan_should_be_on = self.should_fan_be_on(utilization, temperature)
         
         if fan_should_be_on and not fan_is_on:
-            self.logger.info( f"GPU active - Utilization: {utilization}%, Temp: {temperature}°C. Turning fan ON.")
+            self.logger.info(
+                f"GPU active - Utilization: {utilization}%, Temp: {temperature}°C. "
+                "Turning fan ON."
+            )
             self.turn_fan_on()
         
         elif not fan_should_be_on and fan_is_on:
             if self.is_minimum_runtime_satisfied():
-                self.logger.info( f"GPU idle - Utilization: {utilization}%, Temp: {temperature}°C. Turning fan OFF.")
+                self.logger.info(
+                    f"GPU idle - Utilization: {utilization}%, Temp: {temperature}°C. "
+                    "Turning fan OFF."
+                )
                 self.turn_fan_off()
             else:
                 remaining = self.config.minimum_fan_runtime - (time.time() - self.state.fan_activated_at)
-                self.logger.debug(f"GPU idle but minimum runtime not met. {remaining:.0f}s remaining.")
+                self.logger.debug(
+                    f"GPU idle but minimum runtime not met. {remaining:.0f}s remaining."
+                )
     
     def run(self) -> None:
         """Main monitoring loop."""
