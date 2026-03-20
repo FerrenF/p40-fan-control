@@ -9,23 +9,17 @@ import signal
 
 # Fan control script for a PI controlled server fan running over a P40 within a server case.
 
-pi_address = '10.50.55.24'
-
-# Set up basic logging. Absolute path if this is going to be a service.
-logging.basicConfig(filename='/home/hwilliams/gpu_fan_control.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+pi_address = '192.168.1.114'
+import pathlib
+logfile = pathlib.Path(__file__).parent.resolve().joinpath('gpu_fan_control.log')
+logging.basicConfig(filename=logfile, level=logging.DEBUG, format='%(asctime)s - %(message)s')
 
 def get_gpu_processes():
 
     # Query running compute apps on the GPU using the nvidia-smi app
-    result = subprocess.run(
-        ['nvidia-smi', '--query-compute-apps=pid,process_name,used_memory', '--format=csv,noheader'],
-        stdout=subprocess.PIPE,
-        text=True
-    )
-
+    result = subprocess.run(['nvidia-smi', '--query-compute-apps=pid,process_name,used_memory', '--format=csv,noheader'], stdout=subprocess.PIPE, text=True)
     processes = result.stdout.strip().splitlines()
     gpu_processes = []
-
     for process in processes:
         pid, process_name, used_memory = process.split(',')
         gpu_processes.append({
@@ -72,14 +66,6 @@ def get_gpu_utilization():
                             stdout=subprocess.PIPE, text=True)
     utilization = int(result.stdout.strip())  # Utilization is returned as an integer (0-100)
     return utilization
-
-
-
-def is_gpu_in_use(threshold=10):
-    # Consider GPU to be in use if utilization is above the threshold
-    utilization = get_gpu_utilization()
-    return utilization > threshold
-
 
 
 def get_gpu_temperature():
@@ -140,8 +126,6 @@ def control_blower_fan(action):
         logging.exception("Connection to fan controller timed out.", ex)
     return -1
     
-    
-    
 def monitor_gpu_and_control_fan(use_threshold=15, check_interval=20):
   
     while True:
@@ -149,11 +133,11 @@ def monitor_gpu_and_control_fan(use_threshold=15, check_interval=20):
         temperature = get_gpu_temperature()
         fan_status = get_fan_status()
         
-        def is_gpu_getting_hot():
+        def gpu_getting_toasty():
             global define_hot
             return temperature >= define_hot
 
-        if is_gpu_in_use(threshold=use_threshold) or is_gpu_getting_hot():
+        if utilization > use_threshold or gpu_getting_toasty():
             if not fan_status == 1:
                 logging.info(f'GPU in use - Utilization: {utilization}%, Temperature: {temperature}°C. Turning on blower fan.')
                 if control_blower_fan('on'):
